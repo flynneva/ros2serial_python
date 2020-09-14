@@ -1,19 +1,18 @@
-<package>
-  <name>rosserial_python</name>
-  <version>0.9.1</version>
-  <description>
-    A Python-based implementation of the rosserial protocol.
-  </description>
-  <author>Michael Ferguson</author>
-  <maintainer email="paul.bouchier@gmail.com">Paul Bouchier</maintainer>
-  <maintainer email="mpurvis@clearpathrobotics.com">Mike Purvis</maintainer>
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ros2serial_python</name>
+  <version>0.0.0</version>
+  <description>ROS2 port of the original rosserial_python package</description>
+  <maintainer email="evanflynn.msu@gmail.com">Evan Flynn</maintainer>
   <license>BSD</license>
-  <url>http://ros.org/wiki/rosserial_python</url>
 
-  <buildtool_depend>catkin</buildtool_depend>
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
 
-  <run_depend>rospy</run_depend>
-  <run_depend>rosserial_msgs</run_depend>
-  <run_depend>diagnostic_msgs</run_depend>
-  <run_depend>python3-serial</run_depend>
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
 </package>
