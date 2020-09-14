@@ -48,7 +48,7 @@ import time
 from serial import Serial, SerialException, SerialTimeoutException
 
 import roslib
-import rospy
+import rclpy
 from std_msgs.msg import Time
 from rosserial_msgs.msg import TopicInfo, Log
 from rosserial_msgs.srv import RequestParamRequest, RequestParamResponse
