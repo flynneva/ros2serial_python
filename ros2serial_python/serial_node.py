@@ -36,7 +36,7 @@
 __author__ = "mferguson@willowgarage.com (Michael Ferguson)"
 
 import rospy
-from rosserial_python import SerialClient, RosSerialServer
+from ros2serial_python import serial_client, serial_server
 from serial import SerialException
 from time import sleep
 import multiprocessing
@@ -44,15 +44,15 @@ import multiprocessing
 import sys
 
 if __name__=="__main__":
-    rospy.init_node("serial_node")
-    rospy.loginfo("ROS Serial Python Node")
+    rclpy.init(args=sys.argv)
+    node.get_logger().info('Initializing serial_node')
+    node = rclpy.create_node('serial_node')
 
     port_name = rospy.get_param('~port','/dev/ttyUSB0')
     baud = int(rospy.get_param('~baud','57600'))
 
-    # for systems where pyserial yields errors in the fcntl.ioctl(self.fd, TIOCMBIS, \
     # TIOCM_DTR_str) line, which causes an IOError, when using simulated port
-    fix_pyserial_for_test = rospy.get_param('~fix_pyserial_for_test', False)
+    #fix_pyserial_for_test = rospy.get_param('~fix_pyserial_for_test', False)
 
     # TODO: should these really be global?
     tcp_portnum = int(rospy.get_param('/rosserial_embeddedlinux/tcp_port', '11411'))
@@ -66,7 +66,7 @@ if __name__=="__main__":
         tcp_portnum = int(sys.argv[2])
 
     if port_name == "tcp" :
-        server = RosSerialServer(tcp_portnum, fork_server)
+        server = serial_server(tcp_portnum, fork_server)
         rospy.loginfo("Waiting for socket connections on port %d" % tcp_portnum)
         try:
             server.listen()
@@ -84,7 +84,7 @@ if __name__=="__main__":
         while not rospy.is_shutdown():
             rospy.loginfo("Connecting to %s at %d baud" % (port_name,baud) )
             try:
-                client = SerialClient(port_name, baud, fix_pyserial_for_test=fix_pyserial_for_test)
+                client = serial_client(port_name, baud, fix_pyserial_for_test=fix_pyserial_for_test)
                 client.run()
             except KeyboardInterrupt:
                 break
