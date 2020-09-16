@@ -55,262 +55,6 @@ from rosserial_msgs.srv import RequestParamRequest, RequestParamResponse
 
 import diagnostic_msgs.msg
 
-ERROR_MISMATCHED_PROTOCOL = "Mismatched protocol version in packet: lost sync or rosserial_python is from different ros release than the rosserial client"
-ERROR_NO_SYNC = "no sync with device"
-ERROR_PACKET_FAILED = "Packet Failed : Failed to read msg data"
-
-def load_pkg_module(package, directory):
-    #check if its in the python path
-    path = sys.path
-    try:
-        imp.find_module(package)
-    except ImportError:
-        roslib.load_manifest(package)
-    try:
-        m = __import__( package + '.' + directory )
-    except ImportError:
-        rospy.logerr( "Cannot import package : %s"% package )
-        rospy.logerr( "sys.path was " + str(path) )
-        return None
-    return m
-
-def load_message(package, message):
-    m = load_pkg_module(package, 'msg')
-    m2 = getattr(m, 'msg')
-    return getattr(m2, message)
-
-def load_service(package,service):
-    s = load_pkg_module(package, 'srv')
-    s = getattr(s, 'srv')
-    srv = getattr(s, service)
-    mreq = getattr(s, service+"Request")
-    mres = getattr(s, service+"Response")
-    return srv,mreq,mres
-
-class Publisher:
-    """
-        Publisher forwards messages from the serial device to ROS.
-    """
-    def __init__(self, topic_info):
-        """ Create a new publisher. """
-        self.topic = topic_info.topic_name
-
-        # find message type
-        package, message = topic_info.message_type.split('/')
-        self.message = load_message(package, message)
-        if self.message._md5sum == topic_info.md5sum:
-            self.publisher = rospy.Publisher(self.topic, self.message, queue_size=10)
-        else:
-            raise Exception('Checksum does not match: ' + self.message._md5sum + ',' + topic_info.md5sum)
-
-    def handlePacket(self, data):
-        """ Forward message to ROS network. """
-        m = self.message()
-        m.deserialize(data)
-        self.publisher.publish(m)
-
-
-class Subscriber:
-    """
-        Subscriber forwards messages from ROS to the serial device.
-    """
-
-    def __init__(self, topic_info, parent):
-        self.topic = topic_info.topic_name
-        self.id = topic_info.topic_id
-        self.parent = parent
-
-        # find message type
-        package, message = topic_info.message_type.split('/')
-        self.message = load_message(package, message)
-        if self.message._md5sum == topic_info.md5sum:
-            self.subscriber = rospy.Subscriber(self.topic, self.message, self.callback)
-        else:
-            raise Exception('Checksum does not match: ' + self.message._md5sum + ',' + topic_info.md5sum)
-
-    def callback(self, msg):
-        """ Forward message to serial device. """
-        data_buffer = io.BytesIO()
-        msg.serialize(data_buffer)
-        self.parent.send(self.id, data_buffer.getvalue())
-
-    def unregister(self):
-        rospy.loginfo("Removing subscriber: %s", self.topic)
-        self.subscriber.unregister()
-
-class ServiceServer:
-    """
-        ServiceServer responds to requests from ROS.
-    """
-
-    def __init__(self, topic_info, parent):
-        self.topic = topic_info.topic_name
-        self.parent = parent
-
-        # find message type
-        package, service = topic_info.message_type.split('/')
-        s = load_pkg_module(package, 'srv')
-        s = getattr(s, 'srv')
-        self.mreq = getattr(s, service+"Request")
-        self.mres = getattr(s, service+"Response")
-        srv = getattr(s, service)
-        self.service = rospy.Service(self.topic, srv, self.callback)
-
-        # response message
-        self.data = None
-
-    def unregister(self):
-        rospy.loginfo("Removing service: %s", self.topic)
-        self.service.shutdown()
-
-    def callback(self, req):
-        """ Forward request to serial device. """
-        data_buffer = io.BytesIO()
-        req.serialize(data_buffer)
-        self.response = None
-        self.parent.send(self.id, data_buffer.getvalue())
-        while self.response is None:
-            pass
-        return self.response
-
-    def handlePacket(self, data):
-        """ Forward response to ROS network. """
-        r = self.mres()
-        r.deserialize(data)
-        self.response = r
-
-
-class ServiceClient:
-    """
-        ServiceServer responds to requests from ROS.
-    """
-
-    def __init__(self, topic_info, parent):
-        self.topic = topic_info.topic_name
-        self.parent = parent
-
-        # find message type
-        package, service = topic_info.message_type.split('/')
-        s = load_pkg_module(package, 'srv')
-        s = getattr(s, 'srv')
-        self.mreq = getattr(s, service+"Request")
-        self.mres = getattr(s, service+"Response")
-        srv = getattr(s, service)
-        rospy.loginfo("Starting service client, waiting for service '" + self.topic + "'")
-        rospy.wait_for_service(self.topic)
-        self.proxy = rospy.ServiceProxy(self.topic, srv)
-
-    def handlePacket(self, data):
-        """ Forward request to ROS network. """
-        req = self.mreq()
-        req.deserialize(data)
-        # call service proxy
-        resp = self.proxy(req)
-        # serialize and publish
-        data_buffer = io.BytesIO()
-        resp.serialize(data_buffer)
-        self.parent.send(self.id, data_buffer.getvalue())
-
-class RosSerialServer:
-    """
-        RosSerialServer waits for a socket connection then passes itself, forked as a
-        new process, to SerialClient which uses it as a serial port. It continues to listen
-        for additional connections. Each forked process is a new ros node, and proxies ros
-        operations (e.g. publish/subscribe) from its connection to the rest of ros.
-    """
-    def __init__(self, tcp_portnum, fork_server=False):
-        rospy.loginfo("Fork_server is: %s" % fork_server)
-        self.tcp_portnum = tcp_portnum
-        self.fork_server = fork_server
-
-    def listen(self):
-        self.serversocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.serversocket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        #bind the socket to a public host, and a well-known port
-        self.serversocket.bind(("", self.tcp_portnum)) #become a server socket
-        self.serversocket.listen(1)
-
-        while True:
-            #accept connections
-            rospy.loginfo("Waiting for socket connection")
-            clientsocket, address = self.serversocket.accept()
-
-            #now do something with the clientsocket
-            rospy.loginfo("Established a socket connection from %s on port %s" % address)
-            self.socket = clientsocket
-            self.isConnected = True
-
-            if self.fork_server: # if configured to launch server in a separate process
-                rospy.loginfo("Forking a socket server process")
-                process = multiprocessing.Process(target=self.startSocketServer, args=address)
-                process.daemon = True
-                process.start()
-                rospy.loginfo("launched startSocketServer")
-            else:
-                rospy.loginfo("calling startSerialClient")
-                self.startSerialClient()
-                rospy.loginfo("startSerialClient() exited")
-
-    def startSerialClient(self):
-        client = SerialClient(self)
-        try:
-            client.run()
-        except KeyboardInterrupt:
-            pass
-        except RuntimeError:
-            rospy.loginfo("RuntimeError exception caught")
-            self.isConnected = False
-        except socket.error:
-            rospy.loginfo("socket.error exception caught")
-            self.isConnected = False
-        finally:
-            rospy.loginfo("Client has exited, closing socket.")
-            self.socket.close()
-            for sub in client.subscribers.values():
-                sub.unregister()
-            for srv in client.services.values():
-                srv.unregister()
-
-    def startSocketServer(self, port, address):
-        rospy.loginfo("starting ROS Serial Python Node serial_node-%r" % address)
-        rospy.init_node("serial_node_%r" % address)
-        self.startSerialClient()
-
-    def flushInput(self):
-        pass
-
-    def write(self, data):
-        if not self.isConnected:
-            return
-        length = len(data)
-        totalsent = 0
-
-        while totalsent < length:
-            try:
-                totalsent += self.socket.send(data[totalsent:])
-            except BrokenPipeError:
-                raise RuntimeError("RosSerialServer.write() socket connection broken")
-
-    def read(self, rqsted_length):
-        self.msg = b''
-        if not self.isConnected:
-            return self.msg
-
-        while len(self.msg) < rqsted_length:
-            chunk = self.socket.recv(rqsted_length - len(self.msg))
-            if chunk == b'':
-                raise RuntimeError("RosSerialServer.read() socket connection broken")
-            self.msg = self.msg + chunk
-        return self.msg
-
-    def inWaiting(self):
-        try: # the caller checks just for <1, so we'll peek at just one byte
-            chunk = self.socket.recv(1, socket.MSG_DONTWAIT|socket.MSG_PEEK)
-            if chunk == b'':
-                raise RuntimeError("RosSerialServer.inWaiting() socket connection broken")
-            return len(chunk)
-        except BlockingIOError:
-            return 0
 
 class SerialClient(object):
     """
@@ -318,11 +62,18 @@ class SerialClient(object):
     """
     header = b'\xff'
 
+    ERROR_MISMATCHED_PROTOCOL = 'Mismatched protocol version in packet: ' \
+                                'lost sync or rosserial_python is from different ' \
+                                'ros release than the rosserial client'
+    ERROR_NO_SYNC = 'no sync with device'
+    ERROR_PACKET_FAILED = 'Packet Failed : Failed to read msg data'
+
     # hydro introduces protocol ver2 which must match node_handle.h
     # The protocol version is sent as the 2nd sync byte emitted by each end
     protocol_ver1 = b'\xff'
     protocol_ver2 = b'\xfe'
     protocol_ver = protocol_ver2
+
 
     def __init__(self, port=None, baud=57600, timeout=5.0, fix_pyserial_for_test=False):
         """ Initialize node, connect to bus, attempt to negotiate topics. """
@@ -346,7 +97,9 @@ class SerialClient(object):
         self.subscribers = dict() # topic:Subscriber
         self.services = dict()    # topic:Service
 
-        self.pub_diagnostics = rospy.Publisher('/diagnostics', diagnostic_msgs.msg.DiagnosticArray, queue_size=10)
+        self.pub_diagnostics = rospy.Publisher('/diagnostics',
+                                               diagnostic_msgs.msg.DiagnosticArray,
+                                               queue_size=10)
 
         if port is None:
             # no port specified, listen for any new port?
@@ -360,7 +113,8 @@ class SerialClient(object):
                 try:
                     if self.fix_pyserial_for_test:
                         # see https://github.com/pyserial/pyserial/issues/59
-                        self.port = Serial(port, baud, timeout=self.timeout, write_timeout=10, rtscts=True, dsrdtr=True)
+                        self.port = Serial(port, baud, timeout=self.timeout,
+                                           write_timeout=10, rtscts=True, dsrdtr=True)
                     else:
                         self.port = Serial(port, baud, timeout=self.timeout, write_timeout=10)
                     break

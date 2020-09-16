@@ -43,6 +43,7 @@ import multiprocessing
 
 import sys
 
+
 if __name__=="__main__":
     rclpy.init(args=sys.argv)
     node.get_logger().info('Initializing serial_node')
