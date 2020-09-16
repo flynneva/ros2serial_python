@@ -3,7 +3,7 @@
 
 
 
-class RosSerialServer:
+class SerialServer:
     """
         RosSerialServer waits for a socket connection then passes itself, forked as a
         new process, to SerialClient which uses it as a serial port. It continues to listen
