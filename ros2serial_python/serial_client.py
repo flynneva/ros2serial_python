@@ -78,7 +78,7 @@ class SerialClient(object):
     def __init__(self, port=None, baud=57600, timeout=5.0, mode=0):
         """ Initialize node, connect to bus, attempt to negotiate topics. """
         # get time immediately at start of init
-        now = Time().to_msg()
+        now = Time()
 
         self.read_lock = threading.RLock()
 
@@ -124,7 +124,7 @@ class SerialClient(object):
                     rclpy.logging.get_logger('serial_node').error('Error opening serial: ' + str(e))
                     time.sleep(3)
 
-        if rclpy.is_shutdown():
+        if not rclpy.ok():
             return
 
         time.sleep(0.1)           # Wait for ready (patch for Uno)
@@ -146,9 +146,9 @@ class SerialClient(object):
         self.callbacks[TopicInfo.ID_LOG] = self.handleLoggingRequest
         self.callbacks[TopicInfo.ID_TIME] = self.handleTimeRequest
 
-        rclpy.sleep(2.0)
+        time.sleep(2.0)
         self.requestTopics()
-        self.lastsync = self.get_clock().now().to_msg()
+        self.lastsync = Time()
 
     def requestTopics(self):
         """ Determine topics to subscribe/publish. """
@@ -180,7 +180,7 @@ class SerialClient(object):
                 with self.read_lock:
                     received = self.port.read(bytes_remaining)
                 if len(received) != 0:
-                    self.last_read = self.get_clock().now().to_msg()
+                    self.last_read = Time()
                     result.extend(received)
                     bytes_remaining -= len(received)
 
@@ -203,16 +203,16 @@ class SerialClient(object):
         # Handle reading.
         data = ''
         read_step = None
-        while self.write_thread.is_alive() and not rclpy.is_shutdown():
-            if (self.get_clock().now().to_msg() - self.lastsync).to_sec() > (self.timeout * 3):
+        while self.write_thread.is_alive() and rclpy.ok():
+            if (Time() - self.lastsync).to_msg() > (self.timeout * 3):
                 if self.synced:
                     rclpy.logging.get_logger('serial_node').error("Lost sync with device, restarting...")
                 else:
                     rclpy.logging.get_logger('serial_node').error("Unable to sync with device; possible link problem or link software version mismatch such as hydro ros2serial_python with groovy Arduino")
-                self.lastsync_lost = self.get_clock().now().to_msg()
+                self.lastsync_lost = Time()
                 self.sendDiagnostics(diagnostic_msgs.msg.DiagnosticStatus.ERROR, ERROR_NO_SYNC)
                 self.requestTopics()
-                self.lastsync = self.get_clock().now().to_msg()
+                self.lastsync = Time()
 
             # This try-block is here because we make multiple calls to read(). Any one of them can throw
             # an IOError if there's a serial problem or timeout. In that scenario, a single handler at the
@@ -281,7 +281,7 @@ class SerialClient(object):
                 # Validate checksum.
                 if checksum % 256 == 255:
                     self.synced = True
-                    self.lastsync_success = self.get_clock().now().to_msg()
+                    self.lastsync_success = Time()
                     try:
                         self.callbacks[topic_id](msg)
                     except KeyError:
@@ -426,11 +426,10 @@ class SerialClient(object):
     def handleTimeRequest(self, data):
         """ Respond to device with system time. """
         t = Time()
-        t.data = self.get_clock().now().to_msg()
         data_buffer = io.BytesIO()
         t.serialize(data_buffer)
         self.send( TopicInfo.ID_TIME, data_buffer.getvalue() )
-        self.lastsync = self.get_clock().now().to_msg()
+        self.lastsync = Time()
 
     def handleParameterRequest(self, data):
         """ Send parameters to device. Supports only simple datatypes and arrays of such. """
@@ -473,9 +472,9 @@ class SerialClient(object):
         msg = Log()
         msg.deserialize(data)
         if msg.level == Log.ROSDEBUG:
-            rclpy.logdebug(msg.msg)
+            rclpy.logging.get_logger('serial_node').debug(str(msg.msg))
         elif msg.level == Log.INFO:
-            rclpy.logging.get_logger('serial_node').info(msg.msg)
+            rclpy.logging.get_logger('serial_node').info(str(msg.msg))
         elif msg.level == Log.WARN:
             rclpy.logging.get_logger('serial_node').warn(str(msg.msg))
         elif msg.level == Log.ERROR:
@@ -495,7 +494,7 @@ class SerialClient(object):
         """
         with self.write_lock:
             self.port.write(data)
-            self.last_write = self.get_clock().now().to_msg()
+            self.last_write = Time()
 
     def _send(self, topic, msg_bytes):
         """
@@ -549,7 +548,7 @@ class SerialClient(object):
         msg = diagnostic_msgs.msg.DiagnosticArray()
         status = diagnostic_msgs.msg.DiagnosticStatus()
         status.name = "rosserial_python"
-        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.stamp = Time().to_msg()
         msg.status.append(status)
 
         status.message = msg_text
