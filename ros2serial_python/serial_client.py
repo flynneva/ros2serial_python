@@ -48,6 +48,8 @@ import time
 from serial import Serial, SerialException, SerialTimeoutException
 
 import rclpy
+from rclpy.node import Node
+from rclpy.time import Time
 from ros2serial_msgs.msg import TopicInfo, Log
 from ros2serial_msgs.srv import RequestParam
 
@@ -73,8 +75,10 @@ class SerialClient(object):
     protocol_ver = protocol_ver2
 
 
-    def __init__(self, port=None, baud=57600, timeout=5.0, fix_pyserial_for_test=False):
+    def __init__(self, port=None, baud=57600, timeout=5.0, mode=0):
         """ Initialize node, connect to bus, attempt to negotiate topics. """
+        # get time immediately at start of init
+        now = Time().to_msg()
 
         self.read_lock = threading.RLock()
 
@@ -82,22 +86,22 @@ class SerialClient(object):
         self.write_queue = queue.Queue()
         self.write_thread = None
 
-        self.lastsync = rclpy.Time(0)
-        self.lastsync_lost = rclpy.Time(0)
-        self.lastsync_success = rclpy.Time(0)
-        self.last_read = rclpy.Time(0)
-        self.last_write = rclpy.Time(0)
+        self.lastsync = now
+        self.lastsync_lost = now
+        self.lastsync_success = now
+        self.last_read = now
+        self.last_write = now 
         self.timeout = timeout
         self.synced = False
-        self.fix_pyserial_for_test = fix_pyserial_for_test
+        self.mode = mode
 
         self.publishers = dict()  # id:Publishers
         self.subscribers = dict() # topic:Subscriber
         self.services = dict()    # topic:Service
 
-        self.pub_diagnostics = rclpy.Publisher('/diagnostics',
-                                               diagnostic_msgs.msg.DiagnosticArray,
-                                               queue_size=10)
+        #self.pub_diagnostics = rclpy.Publisher('/diagnostics',
+        #                                       diagnostic_msgs.msg.DiagnosticArray,
+        #                                       queue_size=10)
 
         if port is None:
             # no port specified, listen for any new port?
@@ -107,9 +111,9 @@ class SerialClient(object):
             self.port=port
         else:
             # open a specific port
-            while not rclpy.is_shutdown():
+            while rclpy.ok():
                 try:
-                    if self.fix_pyserial_for_test:
+                    if (self.mode != 0):
                         # see https://github.com/pyserial/pyserial/issues/59
                         self.port = Serial(port, baud, timeout=self.timeout,
                                            write_timeout=10, rtscts=True, dsrdtr=True)
@@ -117,7 +121,7 @@ class SerialClient(object):
                         self.port = Serial(port, baud, timeout=self.timeout, write_timeout=10)
                     break
                 except SerialException as e:
-                    rclpy.logerr("Error opening serial: %s", e)
+                    rclpy.logging.get_logger('serial_node').error('Error opening serial: ' + str(e))
                     time.sleep(3)
 
         if rclpy.is_shutdown():
@@ -144,14 +148,14 @@ class SerialClient(object):
 
         rclpy.sleep(2.0)
         self.requestTopics()
-        self.lastsync = rclpy.Time.now()
+        self.lastsync = self.get_clock().now().to_msg()
 
     def requestTopics(self):
         """ Determine topics to subscribe/publish. """
-        rclpy.loginfo('Requesting topics...')
+        rclpy.logging.get_logger('serial_node').info('Requesting topics...')
 
         # TODO remove if possible
-        if not self.fix_pyserial_for_test:
+        if (self.mode != 0):
             with self.read_lock:
                 self.port.flushInput()
 
@@ -160,12 +164,12 @@ class SerialClient(object):
 
     def txStopRequest(self):
         """ Send stop tx request to client before the node exits. """
-        if not self.fix_pyserial_for_test:
+        if (self.mode != 0):
             with self.read_lock:
                 self.port.flushInput()
 
         self.write_queue.put(self.header + self.protocol_ver + b"\x00\x00\xff\x0b\x00\xf4")
-        rclpy.loginfo("Sending tx stop request")
+        rclpy.logging.get_logger('serial_node').info("Sending tx stop request")
 
     def tryRead(self, length):
         try:
@@ -176,7 +180,7 @@ class SerialClient(object):
                 with self.read_lock:
                     received = self.port.read(bytes_remaining)
                 if len(received) != 0:
-                    self.last_read = rclpy.Time.now()
+                    self.last_read = self.get_clock().now().to_msg()
                     result.extend(received)
                     bytes_remaining -= len(received)
 
@@ -200,15 +204,15 @@ class SerialClient(object):
         data = ''
         read_step = None
         while self.write_thread.is_alive() and not rclpy.is_shutdown():
-            if (rclpy.Time.now() - self.lastsync).to_sec() > (self.timeout * 3):
+            if (self.get_clock().now().to_msg() - self.lastsync).to_sec() > (self.timeout * 3):
                 if self.synced:
-                    rclpy.logerr("Lost sync with device, restarting...")
+                    rclpy.logging.get_logger('serial_node').error("Lost sync with device, restarting...")
                 else:
-                    rclpy.logerr("Unable to sync with device; possible link problem or link software version mismatch such as hydro rosserial_python with groovy Arduino")
-                self.lastsync_lost = rclpy.Time.now()
+                    rclpy.logging.get_logger('serial_node').error("Unable to sync with device; possible link problem or link software version mismatch such as hydro ros2serial_python with groovy Arduino")
+                self.lastsync_lost = self.get_clock().now().to_msg()
                 self.sendDiagnostics(diagnostic_msgs.msg.DiagnosticStatus.ERROR, ERROR_NO_SYNC)
                 self.requestTopics()
-                self.lastsync = rclpy.Time.now()
+                self.lastsync = self.get_clock().now().to_msg()
 
             # This try-block is here because we make multiple calls to read(). Any one of them can throw
             # an IOError if there's a serial problem or timeout. In that scenario, a single handler at the
@@ -231,7 +235,7 @@ class SerialClient(object):
                 flag[1] = self.tryRead(1)
                 if flag[1] != self.protocol_ver:
                     self.sendDiagnostics(diagnostic_msgs.msg.DiagnosticStatus.ERROR, ERROR_MISMATCHED_PROTOCOL)
-                    rclpy.logerr("Mismatched protocol version in packet (%s): lost sync or rosserial_python is from different ros release than the rosserial client" % repr(flag[1]))
+                    rclpy.logging.get_logger('serial_node').error("Mismatched protocol version in packet (%s): lost sync or rosserial_python is from different ros release than the rosserial client" % repr(flag[1]))
                     protocol_ver_msgs = {
                             self.protocol_ver1: 'Rev 0 (rosserial 0.4 and earlier)',
                             self.protocol_ver2: 'Rev 1 (rosserial 0.5+)',
@@ -241,7 +245,7 @@ class SerialClient(object):
                         found_ver_msg = 'Protocol version of client is ' + protocol_ver_msgs[flag[1]]
                     else:
                         found_ver_msg = "Protocol version of client is unrecognized"
-                    rclpy.loginfo("%s, expected %s" % (found_ver_msg, protocol_ver_msgs[self.protocol_ver]))
+                    rclpy.logging.get_logger('serial_node').info(found_ver_msg + ', expected ' + str(protocol_ver_msgs[self.protocol_ver]))
                     continue
 
                 # Read message length, checksum (3 bytes)
@@ -251,7 +255,7 @@ class SerialClient(object):
 
                 # Validate message length checksum.
                 if sum(array.array("B", msg_len_bytes)) % 256 != 255:
-                    rclpy.loginfo("Wrong checksum for msg length, length %d, dropping message." % (msg_length))
+                    rclpy.logging.get_logger('serial_node').info('Wrong checksum for msg length, length ' + str(msg.length) + ', dropping message.')
                     continue
 
                 # Read topic id (2 bytes)
@@ -265,8 +269,8 @@ class SerialClient(object):
                     msg = self.tryRead(msg_length)
                 except IOError:
                     self.sendDiagnostics(diagnostic_msgs.msg.DiagnosticStatus.ERROR, ERROR_PACKET_FAILED)
-                    rclpy.loginfo("Packet Failed :  Failed to read msg data")
-                    rclpy.loginfo("expected msg length is %d", msg_length)
+                    rclpy.logging.get_logger('serial_node').info('Packet Failed :  Failed to read msg data')
+                    rclpy.logging.get_logger('serial_node').info('expected msg length is ' + str(msg_length))
                     raise
 
                 # Reada checksum for topic id and msg
@@ -277,19 +281,19 @@ class SerialClient(object):
                 # Validate checksum.
                 if checksum % 256 == 255:
                     self.synced = True
-                    self.lastsync_success = rclpy.Time.now()
+                    self.lastsync_success = self.get_clock().now().to_msg()
                     try:
                         self.callbacks[topic_id](msg)
                     except KeyError:
-                        rclpy.logerr("Tried to publish before configured, topic id %d" % topic_id)
+                        rclpy.logging.get_logger('serial_node').error('Tried to publish before configured, topic id ' + str(topic_id))
                         self.requestTopics()
                     time.sleep(0.001)
                 else:
-                    rclpy.loginfo("wrong checksum for topic id and msg")
+                    rclpy.logging.get_logger('serial_node').info('wrong checksum for topic id and msg')
 
             except IOError as exc:
-                rclpy.logwarn('Last read step: %s' % read_step)
-                rclpy.logwarn('Run loop error: %s' % exc)
+                rclpy.logging.get_logger('serial_node').warn('Last read step: ' + str(read_step))
+                rclpy.logging.get_logger('serial_node').warn('Run loop error: ' + str(exc))
                 # One of the read calls had an issue. Just to be safe, request that the client
                 # reinitialize their topics.
                 with self.read_lock:
@@ -303,12 +307,12 @@ class SerialClient(object):
     def setPublishSize(self, size):
         if self.buffer_out < 0:
             self.buffer_out = size
-            rclpy.loginfo("Note: publish buffer size is %d bytes" % self.buffer_out)
+            rclpy.logging.get_logger('serial_node').info('Note: publish buffer size is ' + self.buffer_out + ' bytes')
 
     def setSubscribeSize(self, size):
         if self.buffer_in < 0:
             self.buffer_in = size
-            rclpy.loginfo("Note: subscribe buffer size is %d bytes" % self.buffer_in)
+            rclpy.logging.get_logger('serial_node').info('Note: subscribe buffer size is ' + self.buffer_in + ' bytes')
 
     def setupPublisher(self, data):
         """ Register a new publisher. """
@@ -319,9 +323,9 @@ class SerialClient(object):
             self.publishers[msg.topic_id] = pub
             self.callbacks[msg.topic_id] = pub.handlePacket
             self.setPublishSize(msg.buffer_size)
-            rclpy.loginfo("Setup publisher on %s [%s]" % (msg.topic_name, msg.message_type) )
+            rclpy.logging.get_logger('serial_node').info('Setup publisher on ' + str(msg.topic_name) + ' [' + str(msg.message_type) + ']')
         except Exception as e:
-            rclpy.logerr("Creation of publisher failed: %s", e)
+            rclpy.logging.get_logger('serial_node').error('Creation of publisher failed: ' + str(e))
 
     def setupSubscriber(self, data):
         """ Register a new subscriber. """
@@ -332,16 +336,16 @@ class SerialClient(object):
                 sub = Subscriber(msg, self)
                 self.subscribers[msg.topic_name] = sub
                 self.setSubscribeSize(msg.buffer_size)
-                rclpy.loginfo("Setup subscriber on %s [%s]" % (msg.topic_name, msg.message_type) )
+                rclpy.logging.get_logger('serial_node').info('Setup subscriber on ' + str(msg.topic_name) + ' [' + str(msg.message_type) + ']')
             elif msg.message_type != self.subscribers[msg.topic_name].message._type:
                 old_message_type = self.subscribers[msg.topic_name].message._type
                 self.subscribers[msg.topic_name].unregister()
                 sub = Subscriber(msg, self)
                 self.subscribers[msg.topic_name] = sub
                 self.setSubscribeSize(msg.buffer_size)
-                rclpy.loginfo("Change the message type of subscriber on %s from [%s] to [%s]" % (msg.topic_name, old_message_type, msg.message_type) )
+                rclpy.logging.get_logger('serial_node').info('Change the message type of subscriber on ' + str(msg.topic_name) + ' from [' + str(old_message_type) + '] to [' + str(msg.message_type) + ']')
         except Exception as e:
-            rclpy.logerr("Creation of subscriber failed: %s", e)
+            rclpy.logging.get_logger('serial_node').error('Creation of subscriber failed: ' + str(e))
 
     def setupServiceServerPublisher(self, data):
         """ Register a new service server. """
@@ -353,14 +357,14 @@ class SerialClient(object):
                 srv = self.services[msg.topic_name]
             except KeyError:
                 srv = ServiceServer(msg, self)
-                rclpy.loginfo("Setup service server on %s [%s]" % (msg.topic_name, msg.message_type) )
+                rclpy.logging.get_logger('serial_node').info('Setup service server on ' + str(msg.topic_name) + ' [' + str(msg.message_type) + ']' )
                 self.services[msg.topic_name] = srv
             if srv.mres._md5sum == msg.md5sum:
                 self.callbacks[msg.topic_id] = srv.handlePacket
             else:
                 raise Exception('Checksum does not match: ' + srv.mres._md5sum + ',' + msg.md5sum)
         except Exception as e:
-            rclpy.logerr("Creation of service server failed: %s", e)
+            rclpy.logging.get_logger('serial_node').error('Creation of service server failed: ' + str(e))
 
     def setupServiceServerSubscriber(self, data):
         """ Register a new service server. """
@@ -372,14 +376,14 @@ class SerialClient(object):
                 srv = self.services[msg.topic_name]
             except KeyError:
                 srv = ServiceServer(msg, self)
-                rclpy.loginfo("Setup service server on %s [%s]" % (msg.topic_name, msg.message_type) )
+                rclpy.logging.get_logger('serial_node').info('Setup service server on ' + str(msg.topic_name) + ' [' + str(msg.message_type) + ']')
                 self.services[msg.topic_name] = srv
             if srv.mreq._md5sum == msg.md5sum:
                 srv.id = msg.topic_id
             else:
                 raise Exception('Checksum does not match: ' + srv.mreq._md5sum + ',' + msg.md5sum)
         except Exception as e:
-            rclpy.logerr("Creation of service server failed: %s", e)
+            rclpy.logging.get_logger('serial_node').error('Creation of service server failed: ' + str(e))
 
     def setupServiceClientPublisher(self, data):
         """ Register a new service client. """
@@ -391,14 +395,14 @@ class SerialClient(object):
                 srv = self.services[msg.topic_name]
             except KeyError:
                 srv = ServiceClient(msg, self)
-                rclpy.loginfo("Setup service client on %s [%s]" % (msg.topic_name, msg.message_type) )
+                rclpy.logging.get_logger('serial_node').info('Setup service client on ' + str(msg.topic_name) + ' [' + str(msg.message_type) + ']')
                 self.services[msg.topic_name] = srv
             if srv.mreq._md5sum == msg.md5sum:
                 self.callbacks[msg.topic_id] = srv.handlePacket
             else:
                 raise Exception('Checksum does not match: ' + srv.mreq._md5sum + ',' + msg.md5sum)
         except Exception as e:
-            rclpy.logerr("Creation of service client failed: %s", e)
+            rclpy.logging.get_logger('serial_node').error('Creation of service client failed: ' + str(e))
 
     def setupServiceClientSubscriber(self, data):
         """ Register a new service client. """
@@ -410,23 +414,23 @@ class SerialClient(object):
                 srv = self.services[msg.topic_name]
             except KeyError:
                 srv = ServiceClient(msg, self)
-                rclpy.loginfo("Setup service client on %s [%s]" % (msg.topic_name, msg.message_type) )
+                rclpy.logging.get_logger('serial_node').info('Setup service client on ' + str(msg.topic_name) + '[' + str(msg.message_type) + ']')
                 self.services[msg.topic_name] = srv
             if srv.mres._md5sum == msg.md5sum:
                 srv.id = msg.topic_id
             else:
                 raise Exception('Checksum does not match: ' + srv.mres._md5sum + ',' + msg.md5sum)
         except Exception as e:
-            rclpy.logerr("Creation of service client failed: %s", e)
+            rclpy.logging.get_logger('serial_node').error('Creation of service client failed: ' + str(e))
 
     def handleTimeRequest(self, data):
         """ Respond to device with system time. """
         t = Time()
-        t.data = rclpy.Time.now()
+        t.data = self.get_clock().now().to_msg()
         data_buffer = io.BytesIO()
         t.serialize(data_buffer)
         self.send( TopicInfo.ID_TIME, data_buffer.getvalue() )
-        self.lastsync = rclpy.Time.now()
+        self.lastsync = self.get_clock().now().to_msg()
 
     def handleParameterRequest(self, data):
         """ Send parameters to device. Supports only simple datatypes and arrays of such. """
@@ -436,15 +440,15 @@ class SerialClient(object):
         try:
             param = rclpy.get_param(req.name)
         except KeyError:
-            rclpy.logerr("Parameter %s does not exist"%req.name)
+            rclpy.logging.get_logger('serial_node').error('Parameter ' + str(req.name) + ' does not exist')
             return
 
         if param is None:
-            rclpy.logerr("Parameter %s does not exist"%req.name)
+            rclpy.logging.get_logger('serial_node').error('Parameter ' + str(req.name) + ' does not exist')
             return
 
         if isinstance(param, dict):
-            rclpy.logerr("Cannot send param %s because it is a dictionary"%req.name)
+            rclpy.logging.get_logger('serial_node').error('Cannot send param ' + str(req.name) + ' because it is a dictionary')
             return
         if not isinstance(param, list):
             param = [param]
@@ -452,7 +456,7 @@ class SerialClient(object):
         t = type(param[0])
         for p in param:
             if t!= type(p):
-                rclpy.logerr('All Paramers in the list %s must be of the same type'%req.name)
+                rclpy.logging.get_logger('serial_node').error('All Paramers in the list ' + str(req.name) + ' must be of the same type')
                 return
         if t == int or t == bool:
             resp.ints = param
@@ -471,13 +475,13 @@ class SerialClient(object):
         if msg.level == Log.ROSDEBUG:
             rclpy.logdebug(msg.msg)
         elif msg.level == Log.INFO:
-            rclpy.loginfo(msg.msg)
+            rclpy.logging.get_logger('serial_node').info(msg.msg)
         elif msg.level == Log.WARN:
-            rclpy.logwarn(msg.msg)
+            rclpy.logging.get_logger('serial_node').warn(str(msg.msg))
         elif msg.level == Log.ERROR:
-            rclpy.logerr(msg.msg)
+            rclpy.logging.get_logger('serial_node').error(str(msg.msg))
         elif msg.level == Log.FATAL:
-            rclpy.logfatal(msg.msg)
+            rclpy.logging.get_logger('serial_node').fatal(str(msg.msg))
 
     def send(self, topic, msg):
         """
@@ -491,7 +495,7 @@ class SerialClient(object):
         """
         with self.write_lock:
             self.port.write(data)
-            self.last_write = rclpy.Time.now()
+            self.last_write = self.get_clock().now().to_msg()
 
     def _send(self, topic, msg_bytes):
         """
@@ -499,7 +503,7 @@ class SerialClient(object):
         """
         length = len(msg_bytes)
         if self.buffer_in > 0 and length > self.buffer_in:
-            rclpy.logerr("Message from ROS network dropped: message larger than buffer.\n%s" % msg)
+            rclpy.logging.get_logger('serial_node').error('Message from ROS network dropped: message larger than buffer.\n' + str(msg))
             return -1
         else:
             # frame : header (1b) + version (1b) + msg_len(2b) + msg_len_chk(1b) + topic_id(2b) + msg(nb) + msg_topic_id_chk(1b)
@@ -518,7 +522,7 @@ class SerialClient(object):
         """
         Main loop for the thread that processes outgoing data to write to the serial port.
         """
-        while not rclpy.is_shutdown():
+        while rclpy.ok():
             if self.write_queue.empty():
                 time.sleep(0.01)
             else:
@@ -531,13 +535,13 @@ class SerialClient(object):
                         elif isinstance(data, bytes):
                             self._write(data)
                         else:
-                            rclpy.logerr("Trying to write invalid data type: %s" % type(data))
+                            rclpy.logging.get_logger('serial_node').error('Trying to write invalid data type: ' + type(data))
                         break
                     except SerialTimeoutException as exc:
-                        rclpy.logerr('Write timeout: %s' % exc)
+                        rclpy.logging.get_logger('serial_node').error('Write timeout: ' + str(exc))
                         time.sleep(1)
                     except RuntimeError as exc:
-                        rclpy.logerr('Write thread exception: %s' % exc)
+                        rclpy.logging.get_logger('serial_node').error('Write thread exception: ' + str(exc))
                         break
 
 
@@ -545,7 +549,7 @@ class SerialClient(object):
         msg = diagnostic_msgs.msg.DiagnosticArray()
         status = diagnostic_msgs.msg.DiagnosticStatus()
         status.name = "rosserial_python"
-        msg.header.stamp = rclpy.Time.now()
+        msg.header.stamp = self.get_clock().now().to_msg()
         msg.status.append(status)
 
         status.message = msg_text
