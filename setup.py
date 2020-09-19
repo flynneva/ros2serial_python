@@ -20,7 +20,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'node = ros2serial_python.serial_node:main'
+            'serial_node = ros2serial_python.serial_node:main',
+            'forwarding_node = ros2serial_python.async_node:main'
         ],
     },
 )
