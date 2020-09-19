@@ -21,7 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'serial_node = ros2serial_python.serial_node:main',
-            'forwarding_node = ros2serial_python.async_node:main'
+            'forwarding_node = ros2serial_python.serial_forwarding:main'
         ],
     },
 )
